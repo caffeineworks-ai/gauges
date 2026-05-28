@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>이미지 치수 추정 및 데이터 내보내기</title>
+    <style>
+        body { font-family: 'Malgun Gothic', sans-serif; margin: 20px; background-color: #f5f6fa; color: #333; }
+        h2 { border-bottom: 2px solid #3498db; padding-bottom: 10px; }
+        .container { display: flex; gap: 20px; flex-wrap: wrap; }
+        .panel { flex: 1; min-width: 300px; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .image-panel { flex: 2; min-width: 400px; display: flex; flex-direction: column; align-items: center; }
+        
+        .input-group { margin-bottom: 15px; }
+        .input-group label { display: block; font-weight: bold; margin-bottom: 5px; font-size: 14px; }
+        .input-group input, .input-group select { width: 100%; padding: 8px; box-sizing: border-box; border: 1px solid #ddd; border-radius: 4px; }
+        
+        /* 이미지 캔버스 영역 */
+        #canvas-container { position: relative; border: 2px dashed #ccc; max-width: 100%; overflow: auto; background: #eee; margin-top: 10px; min-height: 300px; display: flex; justify-content: center; align-items: center; }
+        canvas { cursor: crosshair; display: block; }
+        
+        .radio-group { display: flex; gap: 15px; margin-bottom: 10px; }
+        .radio-group label { font-weight: normal; cursor: pointer; }
+
+        /* 버튼 스타일 */
+        button { width: 100%; padding: 12px; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 16px; margin-top: 10px; }
+        #btn-ok { background-color: #cccccc; color: #666; cursor: not-allowed; }
+        #btn-ok.active { background-color: #2ecc71; color: white; cursor: pointer; }
+        #btn-export { background-color: #3498db; color: white; margin-top: 15px; }
+        
+        /* 결과 텍스트 박스 */
+        #result-box { width: 100%; height: 200px; overflow-y: scroll; border: 1px solid #ccc; background: #1e272e; color: #fff; font-family: monospace; padding: 10px; box-sizing: border-box; border-radius: 4px; white-space: pre-wrap; margin-top: 10px; }
+        
+        .guide { font-size: 12px; color: #7f8c8d; margin-top: 5px; }
+    </style>
+</head>
+<body>
+
+<h2>📐 이미지 기반 치수 추정 도구 (v3)</h2>
+
+<div class="container">
+    <div class="panel">
+        <div class="input-group">
+            <label for="img-url">1. 이미지 URL 입력 (PNG, WebP, JPG 지원)</label>
+            <input type="text" id="img-url" placeholder="https://example.com/image.webp 형태의 URL 입력">
+        </div>
+
+        <div class="input-group">
+            <label>2. 점 지정 모드 선택 (이미지 위를 클릭하세요)</label>
+            <div class="radio-group">
+                <label><input type="radio" name="mode" value="total" checked> 전체 크기 지정 (빨강)</label>
+                <label><input type="radio" name="mode" value="part"> 부분 크기 지정 (파랑)</label>
+            </div>
+            <div class="guide">※ 2개의 점을 찍으면 선이 연결됩니다. (가로/세로 수평 자동 보정)</div>
+        </div>
+
+        <div class="input-group">
+            <label for="total-real-val">3. 물체의 [전체] 실제 크기 입력 (기준값)</label>
+            <input type="number" id="total-real-val" placeholder="예: 200" step="any">
+        </div>
+
+        <div class="input-group">
+            <label>4. 계산된 [부분] 크기 추정치</label>
+            <input type="text" id="part-estimated-val" readonly placeholder="자동 계산됨" style="background:#f1f2f6; font-weight: bold; color: #2980b9;">
+        </div>
+
+        <div class="input-group">
+            <label for="type-select">5. 타입 선택</label>
+            <select id="type-select">
+                <option value="챔퍼">챔퍼 (Chamfer)</option>
+                <option value="필렛">필렛 (Fillet)</option>
+            </select>
+        </div>
+
+        <div class="input-group">
+            <label for="obj-name">6. 물체 이름</label>
+            <input type="text" id="obj-name" placeholder="예: 하우징 케이스">
+        </div>
+
+        <div class="input-group">
+            <label for="obj-adj">7. 묘사 형용사 (| 기호로 구분)</label>
+            <input type="text" id="obj-adj" placeholder="예: 크롬도금된|매끄러운|사각틀">
+        </div>
+
+        <button id="btn-ok" disabled>OK (기록 추가)</button>
+    </div>
+
+    <div class="panel image-panel">
+        <label style="font-weight: bold; align-self: flex-start;">📷 이미지 작업 영역 (가이드라인 활성화)</label>
+        <div id="canvas-container">
+            <canvas id="image-canvas"></canvas>
+        </div>
+        
+        <label style="font-weight: bold; align-self: flex-start; margin-top: 25px;">📊 누적 데이터 기록 (최신순)</label>
+        <div id="result-box">인덱스 키,물체 이름,형용사,타입,전체실제크기,추정부분크기</div>
+        <button id="btn-export">CSV 파일로 Export</button>
+    </div>
+</div>
+
+<script>
+    // 상태 관리 변수들
+    let img = new Image();
+    const canvas = document.getElementById('image-canvas');
+    const ctx = canvas.getContext('2d');
+    
+    let totalPoints = []; // [{x, y}, {x, y}]
+    let partPoints = [];  // [{x, y}, {x, y}]
+    let mousePos = { x: 0, y: 0 }; 
+    let isMouseOver = false;
+    let indexKey = 1;
+    let dataRecords = []; // 저장 데이터 배열
+
+    // DOM 요소들
+    const imgUrlInput = document.getElementById('img-url');
+    const totalRealInput = document.getElementById('total-real-val');
+    const partEstInput = document.getElementById('part-estimated-val');
+    const typeSelect = document.getElementById('type-select');
+    const objNameInput = document.getElementById('obj-name');
+    const objAdjInput = document.getElementById('obj-adj');
+    const btnOk = document.getElementById('btn-ok');
+    const btnExport = document.getElementById('btn-export');
+    const resultBox = document.getElementById('result-box');
+
+    // 이미지 로드 처리
+    imgUrlInput.addEventListener('input', () => {
+        if(imgUrlInput.value.trim() !== "") {
+            img.crossOrigin = "Anonymous"; 
+            img.src = imgUrlInput.value.trim();
+        }
+    });
+
+    img.onload = function() {
+        canvas.width = img.width;
+        canvas.height = img.height;
+        resetPoints();
+        redrawCanvas();
+    };
+
+    img.onerror = function() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        alert("이미지를 불러올 수 없습니다. URL을 확인하시거나 보안(CORS) 제한이 없는 다른 이미지 링크를 사용해주세요.");
+    };
+
+    function resetPoints() {
+        totalPoints = [];
+        partPoints = [];
+        partEstInput.value = "";
+        validateInputs();
+    }
+
+    // 마우스 실시간 위치 추적 (가이드라인용)
+    canvas.addEventListener('mousemove', function(e) {
+        if (!img.src) return;
+        isMouseOver = true;
+        const rect = canvas.getBoundingClientRect();
+        mousePos.x = (e.clientX - rect.left) * (canvas.width / rect.width);
+        mousePos.y = (e.clientY - rect.top) * (canvas.height / rect.height);
+        redrawCanvas(); 
+    });
+
+    canvas.addEventListener('mouseleave', function() {
+        isMouseOver = false;
+        redrawCanvas();
+    });
+
+    // 클릭 시 점 찍기 및 수평/수직 자동 보정
+    canvas.addEventListener('click', function() {
+        if (!img.src) return;
+        
+        const mode = document.querySelector('input[name="mode"]:checked').value;
+
+        if (mode === 'total') {
+            if (totalPoints.length >= 2) totalPoints = [];
+            totalPoints.push({ x: mousePos.x, y: mousePos.y });
+            if (totalPoints.length === 2) applyOrthogonalCorrection(totalPoints);
+        } else {
+            if (partPoints.length >= 2) partPoints = [];
+            partPoints.push({ x: mousePos.x, y: mousePos.y });
+            if (partPoints.length === 2) applyOrthogonalCorrection(partPoints);
+        }
+
+        calculateEstimation();
+        redrawCanvas();
+        validateInputs();
+    });
+
+    // 가로/세로 수평선 보정 알고리즘
+    function applyOrthogonalCorrection(points) {
+        const dx = Math.abs(points[1].x - points[0].x);
+        const dy = Math.abs(points[1].y - points[0].y);
+        if (dx > dy) {
+            points[1].y = points[0].y; 
+        } else {
+            points[1].x = points[0].x; 
+        }
+    }
+
+    // 메인 그리기 함수
+    function redrawCanvas() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (!img.src) return;
+        
+        ctx.drawImage(img, 0, 0);
+
+        // 가이드라인 그리기
+        if (isMouseOver) {
+            ctx.strokeStyle = 'rgba(170, 170, 170, 0.6)'; 
+            ctx.lineWidth = 1;
+            
+            ctx.beginPath();
+            ctx.moveTo(0, mousePos.y);
+            ctx.lineTo(canvas.width, mousePos.y);
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.moveTo(mousePos.x, 0);
+            ctx.lineTo(mousePos.x, canvas.height);
+            ctx.stroke();
+        }
+
+        // 전체 크기선 (빨간색)
+        drawSegment(totalPoints, '#ff4757', '전체');
+        // 부분 크기선 (파란색)
+        drawSegment(partPoints, '#1e90ff', '부분');
+    }
+
+    function drawSegment(points, color, label) {
+        if (points.length > 0) {
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(points[0].x, points[0].y, 6, 0, 2 * Math.PI);
+            ctx.fill();
+        }
+        if (points.length === 2) {
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(points[1].x, points[1].y, 6, 0, 2 * Math.PI);
+            ctx.fill();
+
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(points[0].x, points[0].y);
+            ctx.lineTo(points[1].x, points[1].y);
+            ctx.stroke();
+
+            ctx.font = 'bold 16px Arial';
+            ctx.fillStyle = color;
+            ctx.fillText(label, (points[0].x + points[1].x)/2, (points[0].y + points[1].y)/2 - 10);
+        }
+    }
+
+    function getDistance(points) {
+        if (points.length < 2) return 0;
+        return Math.sqrt(Math.pow(points[1].x - points[0].x, 2) + Math.pow(points[1].y - points[0].y, 2));
+    }
+
+    // 전체 크기로 부분 크기를 추정하는 비례식
+    function calculateEstimation() {
+        const totalPixel = getDistance(totalPoints);
+        const partPixel = getDistance(partPoints);
+        const totalReal = parseFloat(totalRealInput.value);
+
+        if (totalPixel > 0 && partPixel > 0 && !isNaN(totalReal) && totalReal > 0) {
+            const partEstimated = (totalReal * partPixel) / totalPixel;
+            partEstInput.value = partEstimated.toFixed(2);
+        } else {
+            partEstInput.value = "";
+        }
+    }
+
+    // 입력 동적 반응
+    totalRealInput.addEventListener('input', () => {
+        calculateEstimation();
+        validateInputs();
+    });
+    objNameInput.addEventListener('input', validateInputs);
+    objAdjInput.addEventListener('input', validateInputs);
+
+    // 입력 유효성 검사 (OK 버튼 활성화)
+    function validateInputs() {
+        const isImgLoaded = img.src !== "";
+        const isTotalLineDrawn = totalPoints.length === 2;
+        const isPartLineDrawn = partPoints.length === 2;
+        const isTotalRealInputFilled = totalRealInput.value.trim() !== "";
+        const isNameFilled = objNameInput.value.trim() !== "";
+        const isAdjFilled = objAdjInput.value.trim() !== "";
+
+        if (isImgLoaded && isTotalLineDrawn && isPartLineDrawn && isTotalRealInputFilled && isNameFilled && isAdjFilled) {
+            btnOk.disabled = false;
+            btnOk.classList.add('active');
+        } else {
+            btnOk.disabled = true;
+            btnOk.classList.remove('active');
+        }
+    }
+
+    // OK 버튼 저장 로그 생성 (픽셀 데이터 제외)
+    btnOk.addEventListener('click', () => {
+        const record = {
+            index: indexKey++,
+            name: objNameInput.value.trim(),
+            adj: objAdjInput.value.trim(),
+            type: typeSelect.value,
+            totalReal: parseFloat(totalRealInput.value),
+            partEst: parseFloat(partEstInput.value).toFixed(2)
+        };
+
+        dataRecords.unshift(record); // 최신순 정렬
+        updateResultBox();
+        resetForm();
+    });
+
+    // 텍스트 박스 업데이트 (픽셀 수치 완전히 제외)
+    function updateResultBox() {
+        let header = "인덱스 키,물체 이름,형용사,타입,전체실제크기,추정부분크기\n";
+        let content = dataRecords.map(r => 
+            `${r.index},${r.name},"${r.adj}",${r.type},${r.totalReal},${r.partEst}`
+        ).join('\n');
+        
+        resultBox.textContent = header + content;
+    }
+
+    function resetForm() {
+        totalPoints = [];
+        partPoints = [];
+        totalRealInput.value = "";
+        partEstInput.value = "";
+        objNameInput.value = "";
+        objAdjInput.value = "";
+        typeSelect.selectedIndex = 0;
+        
+        redrawCanvas();
+        validateInputs();
+    }
+
+    // CSV 파일 Export
+    btnExport.addEventListener('click', () => {
+        if(dataRecords.length === 0) {
+            alert("내보낼 데이터가 없습니다.");
+            return;
+        }
+        
+        let csvContent = "\uFEFF"; // UTF-8 BOM 
+        csvContent += resultBox.textContent;
+
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.setAttribute("href", url);
+        link.setAttribute("download", `dimension_data_${new Date().toISOString().slice(0,10)}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    });
+</script>
+
+</body>
+</html>
